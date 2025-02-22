@@ -2,11 +2,31 @@ import { deepResearch, ResearchProgress } from 'deep-research/src/deep-research'
 import { generateFeedback } from 'deep-research/src/feedback';
 import { env } from '@/env';
 import FirecrawlApp from '@mendable/firecrawl-js';
+import OpenAI from 'openai';
+
+interface SourceInfo {
+  url: string;
+  title?: string;
+  content?: string;
+  snippet?: string;
+}
+
+interface Fact {
+  fact: string;
+  context: string;
+  source: SourceInfo;
+}
+
+interface FactAnalysis {
+  facts: Fact[];
+  discrepancyTable: string;
+  discrepancySummary: string;
+}
 
 export interface DeepResearchResult {
   title: string;
   content: string;
-  sources: string[];
+  sources: SourceInfo[];
 }
 
 export interface DeepResearchOptions {
@@ -19,6 +39,7 @@ export interface DeepResearchOptions {
 
 export class DeepResearchService {
   private firecrawl: FirecrawlApp;
+  private openai: OpenAI;
 
   constructor() {
     if (!env.NEXT_PUBLIC_FIRECRAWL_KEY) {
@@ -35,6 +56,10 @@ export class DeepResearchService {
     this.firecrawl = new FirecrawlApp({
       apiKey: env.NEXT_PUBLIC_FIRECRAWL_KEY,
       apiUrl: 'https://api.mendable.ai/v1'
+    });
+
+    this.openai = new OpenAI({
+      apiKey: env.NEXT_PUBLIC_OPENAI_API_KEY
     });
   }
 
@@ -216,6 +241,131 @@ export class DeepResearchService {
     return content;
   }
 
+  private async retryWithExponentialBackoff<T>(
+    operation: () => Promise<T>,
+    maxRetries: number = 3,
+    initialDelay: number = 1000
+  ): Promise<T> {
+    let lastError: any;
+    for (let i = 0; i < maxRetries; i++) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error;
+        if (i === maxRetries - 1) break;
+        await new Promise(resolve => setTimeout(resolve, initialDelay * Math.pow(2, i)));
+      }
+    }
+    throw lastError;
+  }
+
+  private parseFactsFromResponse(response: string): Fact[] {
+    try {
+      // Case 1: JSON array format
+      if (response.trim().startsWith('[') && response.trim().endsWith(']')) {
+        return JSON.parse(response);
+      }
+
+      // Case 2: Markdown list format
+      const facts: Fact[] = [];
+      const factRegex = /[-*]\s*(.*?)\s*(?:\n|$)/g;
+      let match;
+      
+      while ((match = factRegex.exec(response)) !== null) {
+        const factText = match[1].trim();
+        if (factText) {
+          // Try to extract source information if available
+          const sourceMatch = factText.match(/\[Source:\s*(.*?)\]/);
+          const source: SourceInfo = {
+            url: sourceMatch ? sourceMatch[1] : 'Unknown source'
+          };
+
+          facts.push({
+            fact: factText.replace(/\[Source:.*?\]/, '').trim(),
+            context: '', // Context might be extracted in a more sophisticated way
+            source
+          });
+        }
+      }
+
+      return facts;
+    } catch (error) {
+      console.error('Error parsing facts from response:', error);
+      return [];
+    }
+  }
+
+  private async extractFacts(content: string, sources: SourceInfo[]): Promise<Fact[]> {
+    try {
+      // Split content into chunks of roughly 4000 characters each
+      const CHUNK_SIZE = 4000;
+      const chunks = [];
+      let currentChunk = '';
+      
+      // Split by paragraphs to avoid cutting in the middle of a fact
+      const paragraphs = content.split('\n\n');
+      for (const paragraph of paragraphs) {
+        if ((currentChunk + paragraph).length > CHUNK_SIZE) {
+          chunks.push(currentChunk);
+          currentChunk = paragraph;
+        } else {
+          currentChunk += (currentChunk ? '\n\n' : '') + paragraph;
+        }
+      }
+      if (currentChunk) {
+        chunks.push(currentChunk);
+      }
+
+      // Process each chunk
+      const allFacts: Fact[] = [];
+      for (const chunk of chunks) {
+        const completion = await this.retryWithExponentialBackoff(async () => {
+          return await this.openai.chat.completions.create({
+            model: 'gpt-4',
+            messages: [
+              {
+                role: 'system',
+                content: `You are a highly accurate "Fact Extractor" AI. Extract only factual statements (no opinions, no speculations) from the given text. Return the facts in a structured format where each fact includes:
+                - The factual statement
+                - The context where it was found
+                - The source URL and title where this fact came from
+                Include ONLY facts that can be directly attributed to the sources provided.`
+              },
+              {
+                role: 'user',
+                content: `Text to extract facts from:\n${chunk}\n\nAvailable sources:\n${sources.map(s => `${s.url}${s.title ? ` - ${s.title}` : ''}`).join('\n')}`
+              }
+            ],
+            temperature: 0,
+            max_tokens: 2000, // Reduced to ensure we stay within limits
+            presence_penalty: 0,
+            frequency_penalty: 0
+          });
+        });
+
+        const response = completion.choices[0]?.message?.content;
+        if (!response) {
+          console.warn('Empty response from fact extraction for chunk');
+          continue;
+        }
+
+        // Parse the response into structured facts
+        const chunkFacts = this.parseFactsFromResponse(response);
+        allFacts.push(...chunkFacts);
+      }
+
+      // Remove any duplicate facts
+      const uniqueFacts = allFacts.filter((fact, index, self) =>
+        index === self.findIndex((f) => f.fact === fact.fact)
+      );
+
+      return uniqueFacts;
+    } catch (error) {
+      console.error('Error extracting facts:', error);
+      return [];
+    }
+  }
+
   async research(query: string, options: DeepResearchOptions = {}): Promise<DeepResearchResult> {
     try {
       const { breadth = 4, depth = 2, onProgress, onQuestion, onThought } = options;
@@ -291,16 +441,31 @@ ${questions.map((q, i) => answers[i] ? `Q: ${q}\nA: ${answers[i]}` : '').filter(
           firecrawl: this.firecrawl,
         });
 
-        onThought?.('Research complete! Organizing and formatting results...');
+        onThought?.('Research complete! Analyzing sources and extracting facts...');
+
+        // Convert visited URLs to SourceInfo objects
+        const sources: SourceInfo[] = result.visitedUrls.map(url => ({ url }));
+
+        // Extract facts from the learnings
+        const facts = await this.extractFacts(result.learnings.join('\n'), sources);
+
+        onThought?.('Facts extracted! Organizing and formatting results...');
 
         // Format the content in a structured way
         const formattedContent = this.formatContent(result.learnings);
 
-        return {
+        const finalResult = {
           title: 'Research Results',
           content: formattedContent,
-          sources: result.visitedUrls,
+          sources,
         };
+
+        // Verify the result structure
+        if (!finalResult.content || typeof finalResult.content !== 'string') {
+          throw new Error('Invalid research result: content is missing or invalid');
+        }
+
+        return finalResult;
       } finally {
         // Restore original console methods
         console.log = originalConsole.log;

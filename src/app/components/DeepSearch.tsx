@@ -17,7 +17,7 @@ interface ResearchProgress {
 interface ResearchResult {
   title: string;
   content: string;
-  sources: string[];
+  sources: { url: string; title?: string; content?: string; snippet?: string; }[];
 }
 
 interface QuestionModalProps {
@@ -61,12 +61,6 @@ function QuestionModal({ question, onAnswer, onSkip }: QuestionModalProps) {
   );
 }
 
-// First, add a new interface for thoughts with timestamps
-interface ThoughtWithTimestamp {
-  text: string;
-  timestamp: Date;
-}
-
 export function DeepSearchComponent() {
   const [query, setQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -74,7 +68,7 @@ export function DeepSearchComponent() {
   const [result, setResult] = useState<ResearchResult | null>(null);
   const [progress, setProgress] = useState<ResearchProgress | null>(null);
   const [currentQuestion, setCurrentQuestion] = useState<string | null>(null);
-  const [thoughts, setThoughts] = useState<ThoughtWithTimestamp[]>([]);
+  const [thoughts, setThoughts] = useState<string[]>([]);
   const thoughtsEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll thoughts to bottom
@@ -136,26 +130,33 @@ export function DeepSearchComponent() {
         for (const line of lines) {
           if (!line.trim()) continue;
 
-          const [eventLine, dataLine] = line.split('\n');
-          const event = eventLine.replace('event: ', '');
-          const data = JSON.parse(dataLine.replace('data: ', ''));
+          try {
+            const [eventLine, dataLine] = line.split('\n');
+            const event = eventLine.replace('event: ', '');
+            const data = JSON.parse(dataLine.replace('data: ', ''));
 
-          switch (event) {
-            case 'progress':
-              setProgress(data);
-              break;
-            case 'question':
-              setCurrentQuestion(data.question);
-              break;
-            case 'thought':
-              setThoughts(prev => [...prev, { text: data.thought, timestamp: new Date() }]);
-              break;
-            case 'result':
-              setResult(data.results);
-              setIsLoading(false);
-              break;
-            case 'error':
-              throw new Error(data.message);
+            console.log('Received event:', event, 'with data:', data);
+
+            switch (event) {
+              case 'progress':
+                setProgress(data);
+                break;
+              case 'question':
+                setCurrentQuestion(data.question);
+                break;
+              case 'thought':
+                setThoughts(prev => [...prev, data.thought]);
+                break;
+              case 'result':
+                console.log('Setting result:', data.results);
+                setResult(data.results);
+                setIsLoading(false);
+                break;
+              case 'error':
+                throw new Error(data.message);
+            }
+          } catch (parseError) {
+            console.error('Error parsing SSE data:', parseError, 'Line:', line);
           }
         }
       }
@@ -168,16 +169,6 @@ export function DeepSearchComponent() {
       );
       setIsLoading(false);
     }
-  };
-
-  // Function to format timestamp
-  const formatTimestamp = (date: Date) => {
-    return date.toLocaleTimeString('en-US', { 
-      hour12: false,
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit'
-    });
   };
 
   return (
@@ -252,31 +243,28 @@ export function DeepSearchComponent() {
             </svg>
             <h3 className="text-lg font-semibold text-gray-900">Research Assistant's Thought Process</h3>
           </div>
-          <div className="space-y-3">
+          <div className="space-y-2">
             {thoughts.map((thought, index) => {
               // Determine the type of thought for styling
-              const isProgress = thought.text.includes('Progress:') || thought.text.includes('%');
-              const isQuestion = thought.text.includes('?');
-              const isAction = thought.text.includes('Starting') || thought.text.includes('Generating') || thought.text.includes('Processing');
-              const isResult = thought.text.includes('Found') || thought.text.includes('Created') || thought.text.includes('Complete');
+              const isProgress = thought.includes('Progress:') || thought.includes('%');
+              const isQuestion = thought.includes('?');
+              const isAction = thought.includes('Starting') || thought.includes('Generating') || thought.includes('Processing');
+              const isResult = thought.includes('Found') || thought.includes('Created') || thought.includes('Complete');
 
               return (
                 <div 
                   key={index} 
                   className={`flex items-start gap-2 p-3 rounded-md border ${
-                    isProgress ? 'border-indigo-100 bg-indigo-50/30' :
+                    isProgress ? 'border-blue-100 bg-blue-50/30' :
                     isQuestion ? 'border-indigo-100 bg-indigo-50/30' :
-                    isAction ? 'border-indigo-100 bg-indigo-50/30' :
-                    isResult ? 'border-indigo-100 bg-indigo-50/30' :
+                    isAction ? 'border-purple-100 bg-purple-50/30' :
+                    isResult ? 'border-green-100 bg-green-50/30' :
                     'border-gray-100 bg-gray-50/30'
                   }`}
                 >
-                  <div className="flex-shrink-0 text-xs text-gray-400 mt-1 w-16">
-                    {formatTimestamp(thought.timestamp)}
-                  </div>
                   {/* Icon based on thought type */}
                   {isProgress ? (
-                    <svg className="w-4 h-4 text-indigo-600 mt-1 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg className="w-4 h-4 text-blue-600 mt-1 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                     </svg>
                   ) : isQuestion ? (
@@ -284,22 +272,26 @@ export function DeepSearchComponent() {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
                   ) : isAction ? (
-                    <svg className="w-4 h-4 text-indigo-600 mt-1 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg className="w-4 h-4 text-purple-600 mt-1 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                     </svg>
                   ) : isResult ? (
-                    <svg className="w-4 h-4 text-indigo-600 mt-1 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg className="w-4 h-4 text-green-600 mt-1 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
                   ) : (
-                    <svg className="w-4 h-4 text-indigo-400 mt-1 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg className="w-4 h-4 text-gray-500 mt-1 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
                   )}
-                  <div className={`text-sm flex-grow ${
-                    isProgress || isQuestion || isAction || isResult ? 'text-gray-700' : 'text-gray-600'
+                  <div className={`text-sm ${
+                    isProgress ? 'text-blue-900' :
+                    isQuestion ? 'text-indigo-900' :
+                    isAction ? 'text-purple-900' :
+                    isResult ? 'text-green-900' :
+                    'text-gray-700'
                   }`}>
-                    {thought.text}
+                    {thought}
                   </div>
                 </div>
               );
@@ -338,9 +330,12 @@ export function DeepSearchComponent() {
               <ul className="space-y-2">
                 {result.sources.map((source, index) => (
                   <li key={index} className="text-indigo-600 hover:text-indigo-800">
-                    <a href={source} target="_blank" rel="noopener noreferrer" className="break-all">
-                      {source}
+                    <a href={source.url} target="_blank" rel="noopener noreferrer" className="break-all">
+                      {source.title || source.url}
                     </a>
+                    {source.snippet && (
+                      <p className="text-sm text-gray-600 mt-1">{source.snippet}</p>
+                    )}
                   </li>
                 ))}
               </ul>
