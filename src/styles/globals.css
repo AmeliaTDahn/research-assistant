@@ -1,0 +1,46 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --primary-gradient: linear-gradient(135deg, #a5b4fc 0%, #818cf8 50%, #6366f1 100%);
+  --secondary-gradient: linear-gradient(135deg, #fce7f3 0%, #fbcfe8 50%, #f9a8d4 100%);
+  --background-gradient: linear-gradient(135deg, #f5f3ff 0%, #ede9fe 25%, #ddd6fe 50%, #e0e7ff 75%, #eef2ff 100%);
+}
+
+@layer base {
+  body {
+    @apply min-h-screen bg-gradient-to-br from-purple-50 via-pink-50 to-blue-50;
+    background-image: var(--background-gradient);
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply bg-white/70 backdrop-blur-md border border-white/20 shadow-xl;
+  }
+
+  .gradient-border {
+    position: relative;
+    border: double 1px transparent;
+    border-radius: 0.5rem;
+    background-image: linear-gradient(white, white), var(--primary-gradient);
+    background-origin: border-box;
+    background-clip: padding-box, border-box;
+  }
+
+  .gradient-text {
+    @apply text-transparent bg-clip-text;
+    background-image: var(--primary-gradient);
+  }
+
+  .button-gradient {
+    @apply text-white transition-all duration-200;
+    background-image: var(--primary-gradient);
+  }
+
+  .button-gradient:hover {
+    filter: brightness(1.1) hue-rotate(5deg);
+    transform: translateY(-1px);
+  }
+} 
