@@ -3,6 +3,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { LoadingSpinner } from './loading-spinner';
 import ReactMarkdown from 'react-markdown';
+import { findResearchQuery, storeResearchQuery, findReadingLevel, storeReadingLevel } from '@/lib/research-storage';
+import { ChatInterface } from './ChatInterface';
 
 interface ResearchProgress {
   currentDepth: number;
@@ -18,7 +20,10 @@ interface ResearchResult {
   title: string;
   content: string;
   sources: { url: string; title?: string; content?: string; snippet?: string; }[];
+  suggestedTopics?: string[];
 }
+
+type ReadingLevel = 'advanced' | 'intermediate' | 'beginner';
 
 interface QuestionModalProps {
   question: string;
@@ -69,7 +74,28 @@ export function DeepSearchComponent() {
   const [progress, setProgress] = useState<ResearchProgress | null>(null);
   const [currentQuestion, setCurrentQuestion] = useState<string | null>(null);
   const [thoughts, setThoughts] = useState<string[]>([]);
+  const [readingLevel, setReadingLevel] = useState<ReadingLevel>('advanced');
+  const [isAdjustingLevel, setIsAdjustingLevel] = useState(false);
+  const [adjustedContent, setAdjustedContent] = useState<string | null>(null);
+  const [currentQueryId, setCurrentQueryId] = useState<string | null>(null);
   const thoughtsEndRef = useRef<HTMLDivElement>(null);
+
+  // Clean content by removing code artifacts and object notations
+  const cleanContent = (content: string) => {
+    return content
+      // Remove [object Object] and similar patterns
+      .replace(/,?\s*\[object Object\]/g, '')
+      // Remove extra commas that might be left
+      .replace(/,\s*,/g, ',')
+      .replace(/,\s*\./g, '.')
+      .replace(/\s*,\s*$/g, '')
+      // Fix any double spaces
+      .replace(/\s+/g, ' ')
+      // Fix spacing around punctuation
+      .replace(/\s+\./g, '.')
+      .replace(/\s+,/g, ',')
+      .trim();
+  };
 
   // Auto-scroll thoughts to bottom
   useEffect(() => {
@@ -90,6 +116,29 @@ export function DeepSearchComponent() {
     }
   };
 
+  const formatInitialContent = async (content: string) => {
+    try {
+      const response = await fetch('/api/adjust-reading-level', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content,
+          targetLevel: 'advanced',
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to format content');
+      }
+
+      return data.content;
+    } catch (error) {
+      console.error('Error formatting content:', error);
+      return content; // Return original content if formatting fails
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!query.trim()) return;
@@ -99,6 +148,22 @@ export function DeepSearchComponent() {
     setResult(null);
     setProgress(null);
     setThoughts([]);
+    setCurrentQueryId(null);
+    setAdjustedContent(null);
+
+    // First, check if we already have this query stored
+    const existingQuery = await findResearchQuery(query.trim());
+    if (existingQuery) {
+      setResult({
+        title: '',
+        content: existingQuery.content,
+        sources: existingQuery.sources,
+        suggestedTopics: existingQuery.suggested_topics
+      });
+      setCurrentQueryId(existingQuery.id);
+      setIsLoading(false);
+      return;
+    }
 
     try {
       const response = await fetch('/api/deep-search', {
@@ -149,7 +214,31 @@ export function DeepSearchComponent() {
                 break;
               case 'result':
                 console.log('Setting result:', data.results);
-                setResult(data.results);
+                const formattedContent = await formatInitialContent(cleanContent(data.results.content));
+                const cleanedResult = {
+                  ...data.results,
+                  content: formattedContent
+                };
+                
+                // Store the query result
+                const storedQuery = await storeResearchQuery(
+                  query.trim(),
+                  cleanedResult.content,
+                  cleanedResult.sources,
+                  cleanedResult.suggestedTopics
+                );
+                
+                if (storedQuery) {
+                  setCurrentQueryId(storedQuery.id);
+                  // Store the initial content as advanced reading level
+                  await storeReadingLevel(
+                    storedQuery.id,
+                    'advanced',
+                    cleanedResult.content
+                  );
+                }
+                
+                setResult(cleanedResult);
                 setIsLoading(false);
                 break;
               case 'error':
@@ -168,6 +257,63 @@ export function DeepSearchComponent() {
           : 'An unexpected error occurred while processing your request'
       );
       setIsLoading(false);
+    }
+  };
+
+  // Clean text content for ReactMarkdown
+  const processMarkdownContent = (content: string) => {
+    const lines = content.split('\n');
+    return lines
+      .map(line => cleanContent(line))
+      .filter(line => line.trim() !== '')
+      .join('\n');
+  };
+
+  const adjustReadingLevel = async (level: ReadingLevel) => {
+    if (!result || !currentQueryId) return;
+    
+    setIsAdjustingLevel(true);
+    setError(null);
+
+    try {
+      // First, check if we already have this reading level stored
+      const existingLevel = await findReadingLevel(currentQueryId, level);
+      if (existingLevel) {
+        setAdjustedContent(existingLevel.content);
+        setReadingLevel(level);
+        setIsAdjustingLevel(false);
+        return;
+      }
+
+      const response = await fetch('/api/adjust-reading-level', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: result.content,
+          targetLevel: level,
+        }),
+      });
+
+      const data = await response.json();
+      
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to adjust reading level');
+      }
+
+      if (data.content) {
+        // Store the adjusted content
+        await storeReadingLevel(currentQueryId, level, data.content);
+        
+        setAdjustedContent(data.content);
+        setReadingLevel(level);
+      } else {
+        throw new Error('No content received from server');
+      }
+    } catch (error) {
+      console.error('Error adjusting reading level:', error);
+      setError(error instanceof Error ? error.message : 'Failed to adjust reading level');
+    } finally {
+      setIsAdjustingLevel(false);
     }
   };
 
@@ -308,37 +454,186 @@ export function DeepSearchComponent() {
       )}
 
       {result && (
-        <div className="space-y-6">
-          <div className="prose prose-lg prose-indigo max-w-none">
-            <ReactMarkdown
-              components={{
-                h1: ({node, ...props}) => <h1 className="text-3xl font-bold text-gray-900 mb-6" {...props} />,
-                h2: ({node, ...props}) => <h2 className="text-2xl font-semibold text-gray-800 mt-8 mb-4" {...props} />,
-                h3: ({node, ...props}) => <h3 className="text-xl font-medium text-gray-700 mt-6 mb-3" {...props} />,
-                ul: ({node, ...props}) => <ul className="space-y-2" {...props} />,
-                li: ({node, ...props}) => <li className="text-gray-600" {...props} />,
-                hr: ({node, ...props}) => <hr className="my-6 border-gray-200" {...props} />,
-                p: ({node, ...props}) => <p className="text-gray-600 mb-4" {...props} />
-              }}
-            >
-              {result.content}
-            </ReactMarkdown>
+        <div className="space-y-8">
+          {/* Reading Level Selector */}
+          <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-200">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <svg className="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                </svg>
+                <span className="font-medium text-gray-900">Reading Level</span>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => adjustReadingLevel('beginner')}
+                  className={`px-3 py-1 rounded-md text-sm font-medium transition-colors ${
+                    readingLevel === 'beginner'
+                      ? 'bg-green-100 text-green-800 border border-green-200'
+                      : 'text-gray-600 hover:bg-gray-100'
+                  }`}
+                  disabled={isAdjustingLevel}
+                >
+                  Beginner
+                </button>
+                <button
+                  onClick={() => adjustReadingLevel('intermediate')}
+                  className={`px-3 py-1 rounded-md text-sm font-medium transition-colors ${
+                    readingLevel === 'intermediate'
+                      ? 'bg-blue-100 text-blue-800 border border-blue-200'
+                      : 'text-gray-600 hover:bg-gray-100'
+                  }`}
+                  disabled={isAdjustingLevel}
+                >
+                  Intermediate
+                </button>
+                <button
+                  onClick={() => adjustReadingLevel('advanced')}
+                  className={`px-3 py-1 rounded-md text-sm font-medium transition-colors ${
+                    readingLevel === 'advanced'
+                      ? 'bg-indigo-100 text-indigo-800 border border-indigo-200'
+                      : 'text-gray-600 hover:bg-gray-100'
+                  }`}
+                  disabled={isAdjustingLevel}
+                >
+                  Advanced
+                </button>
+              </div>
+            </div>
+            {isAdjustingLevel && (
+              <div className="mt-2 flex items-center justify-center text-sm text-gray-600">
+                <LoadingSpinner />
+                <span className="ml-2">Adjusting reading level...</span>
+              </div>
+            )}
           </div>
+
+          {/* Main Content */}
+          <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
+            <div className="prose prose-indigo max-w-none">
+              <ReactMarkdown
+                components={{
+                  h1: ({children}) => (
+                    <h1 className="text-3xl font-bold text-gray-900 mb-6">{children}</h1>
+                  ),
+                  h2: ({children}) => (
+                    <h2 className="text-2xl font-bold text-gray-900 flex items-center gap-2 mt-8 mb-4 border-b border-gray-100 pb-2">
+                      <svg className="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                      </svg>
+                      {children}
+                    </h2>
+                  ),
+                  h3: ({children}) => (
+                    <h3 className="text-xl font-semibold text-gray-800 mt-6 mb-3">{children}</h3>
+                  ),
+                  p: ({children}) => (
+                    <p className="text-gray-600 leading-relaxed my-4 pl-8">{children}</p>
+                  ),
+                  ul: ({children}) => (
+                    <ul className="space-y-3 my-4 pl-8">{children}</ul>
+                  ),
+                  li: ({children}) => (
+                    <li className="flex items-start gap-3">
+                      <svg className="w-5 h-5 text-indigo-500 mt-1 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                      <span className="text-gray-700">{children}</span>
+                    </li>
+                  ),
+                  strong: ({children}) => (
+                    <strong className="font-semibold text-indigo-700">{children}</strong>
+                  ),
+                  em: ({children}) => (
+                    <em className="text-indigo-600 font-medium not-italic">{children}</em>
+                  ),
+                }}
+              >
+                {processMarkdownContent(adjustedContent || result.content)}
+              </ReactMarkdown>
+            </div>
+          </div>
+
+          {/* Chat Interface */}
+          <div className="mt-8">
+            <ChatInterface 
+              researchContent={adjustedContent || result.content} 
+              sources={result.sources}
+            />
+          </div>
+
+          {/* Sources Section */}
           {result.sources.length > 0 && (
-            <div className="mt-8 bg-gray-50 p-6 rounded-lg">
-              <h3 className="text-lg font-semibold text-gray-900 mb-4">Sources</h3>
-              <ul className="space-y-2">
+            <div className="bg-gray-50 rounded-xl p-6 shadow-sm border border-gray-200">
+              <h2 className="text-2xl font-bold text-gray-900 flex items-center gap-2 mb-4">
+                <svg className="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                </svg>
+                Sources
+              </h2>
+              <ul className="grid gap-3">
                 {result.sources.map((source, index) => (
-                  <li key={index} className="text-indigo-600 hover:text-indigo-800">
-                    <a href={source.url} target="_blank" rel="noopener noreferrer" className="break-all">
-                      {source.title || source.url}
+                  <li key={index} className="bg-white p-4 rounded-lg border border-gray-100 hover:border-indigo-200 transition-colors duration-200">
+                    <a
+                      href={source.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="block group"
+                    >
+                      <div className="flex items-start gap-3">
+                        <svg className="w-5 h-5 text-gray-400 group-hover:text-indigo-500 mt-1 flex-shrink-0 transition-colors duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                        </svg>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-indigo-600 group-hover:text-indigo-700 font-medium transition-colors duration-200 break-words line-clamp-2">
+                            {source.title || source.url.replace(/^https?:\/\/(www\.)?/, '')}
+                          </div>
+                          {source.snippet && (
+                            <p className="text-sm text-gray-500 mt-1 break-words line-clamp-2">{source.snippet}</p>
+                          )}
+                          <span className="text-xs text-gray-400 mt-1 block break-all">
+                            {source.url.replace(/^https?:\/\/(www\.)?/, '')}
+                          </span>
+                        </div>
+                      </div>
                     </a>
-                    {source.snippet && (
-                      <p className="text-sm text-gray-600 mt-1">{source.snippet}</p>
-                    )}
                   </li>
                 ))}
               </ul>
+            </div>
+          )}
+
+          {/* Suggested Topics Section */}
+          {result.suggestedTopics && result.suggestedTopics.length > 0 && (
+            <div className="bg-gray-50 rounded-xl p-6 shadow-sm border border-gray-200">
+              <h2 className="text-2xl font-bold text-gray-900 flex items-center gap-2 mb-4">
+                <svg className="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                </svg>
+                Want to dive deeper?
+              </h2>
+              <div className="grid gap-3 mt-4">
+                {result.suggestedTopics.map((topic, index) => (
+                  <button
+                    key={index}
+                    onClick={() => {
+                      setQuery(topic);
+                      handleSubmit(new Event('submit') as any);
+                    }}
+                    className="text-left px-4 py-3 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 hover:border-indigo-300 transition-all duration-200 flex items-center group"
+                  >
+                    <span className="text-gray-900 flex-grow">{topic}</span>
+                    <svg 
+                      className="w-5 h-5 text-gray-400 group-hover:text-indigo-600 transition-colors duration-200" 
+                      fill="none" 
+                      stroke="currentColor" 
+                      viewBox="0 0 24 24"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
+                    </svg>
+                  </button>
+                ))}
+              </div>
             </div>
           )}
         </div>

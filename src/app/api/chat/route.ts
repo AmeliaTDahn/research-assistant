@@ -13,99 +13,93 @@ const anthropic = new Anthropic({
 
 const PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions";
 
-export async function POST(req: Request) {
+if (!process.env.NEXT_PUBLIC_OPENAI_API_KEY) {
+  throw new Error('Missing NEXT_PUBLIC_OPENAI_API_KEY environment variable');
+}
+
+interface Source {
+  url: string;
+  title?: string;
+  content?: string;
+  snippet?: string;
+}
+
+interface FormattedSource {
+  url: string;
+  title: string;
+  excerpt?: string;
+  content?: string;
+}
+
+function formatSources(sources: Source[]): FormattedSource[] {
+  return sources.map(source => {
+    const formattedSource: FormattedSource = {
+      url: source.url,
+      title: source.title || source.url.replace(/^https?:\/\/(www\.)?/, ''),
+    };
+    if (source.snippet) {
+      formattedSource.excerpt = source.snippet;
+    }
+    if (source.content) {
+      formattedSource.content = source.content;
+    }
+    return formattedSource;
+  });
+}
+
+export async function POST(request: Request) {
   try {
-    const { userInput } = await req.json();
-    console.log("Received user input:", userInput);
+    const { question, researchContent, sources } = await request.json();
 
-    const llmPromises = [
-      // GPT-4 response
-      openai.chat.completions.create({
-        model: "gpt-4",
-        messages: [{ role: "user", content: userInput }],
-      }).then(response => ({
-        id: "gpt4-" + Date.now(),
-        name: "GPT-4",
-        response: response.choices[0]?.message?.content || "No response",
-      }))
-      .catch(error => {
-        console.error("GPT-4 API error:", error);
-        return { 
-          id: "gpt4-error-" + Date.now(),
-          name: "GPT-4", 
-          response: "Error getting response from GPT-4" 
-        };
-      }),
+    if (!question || !researchContent) {
+      return NextResponse.json(
+        { error: 'Question and research content are required' },
+        { status: 400 }
+      );
+    }
 
-      // Claude response
-      anthropic.messages.create({
-        model: "claude-3-opus-20240229",
-        max_tokens: 1024,
-        messages: [{ role: "user", content: userInput }],
-      }).then(response => ({
-        id: "claude-" + Date.now(),
-        name: "Claude",
-        response: response.content[0]?.text || "No response",
-      }))
-      .catch(error => {
-        console.error("Claude API error:", error);
-        return { 
-          id: "claude-error-" + Date.now(),
-          name: "Claude", 
-          response: "Error getting response from Claude" 
-        };
-      }),
+    const formattedSources = sources ? formatSources(sources) : [];
+    const sourceContext = formattedSources.length > 0 
+      ? `\n\nSource Materials:\n${JSON.stringify(formattedSources, null, 2)}`
+      : '';
 
-      // Perplexity response
-      fetch(PERPLEXITY_API_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "application/json",
-          "Authorization": process.env.PERPLEXITY_API_KEY?.trim() || '',
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4-turbo-preview",
+      messages: [
+        {
+          role: "system",
+          content: `You are a helpful research assistant that answers questions about research content. 
+Your responses should be:
+- Concise and direct
+- Based on the provided research content and source materials
+- Include specific references to sections of the content when relevant
+- Reference specific sources when appropriate
+- Admit when you don't have enough information to answer
+- Professional but conversational in tone
+
+Here is the research content and sources to reference:
+
+Main Content:
+${researchContent}${sourceContext}`
         },
-        body: JSON.stringify({
-          model: "pplx-7b-online",
-          messages: [
-            {
-              role: "system",
-              content: "You are a helpful research assistant."
-            },
-            {
-              role: "user",
-              content: userInput
-            }
-          ],
-        }),
-      })
-      .then(async res => {
-        if (!res.ok) {
-          throw new Error(`Perplexity API error: ${res.status}`);
+        {
+          role: "user",
+          content: question
         }
-        return res.json();
-      })
-      .then(data => ({
-        id: "llama-" + Date.now(),
-        name: "Llama",
-        response: data.choices[0]?.message?.content || "No response",
-      }))
-      .catch(error => {
-        console.error("Perplexity API error:", error);
-        return { 
-          id: "llama-error-" + Date.now(),
-          name: "Llama", 
-          response: "Error getting response from Llama" 
-        };
-      }),
-    ];
+      ],
+      temperature: 0.7,
+    });
 
-    const responses = await Promise.all(llmPromises);
-    return NextResponse.json({ responses });
-    
+    const answer = completion.choices[0].message.content;
+    if (!answer) {
+      throw new Error('OpenAI returned empty content');
+    }
+
+    return NextResponse.json({ answer });
   } catch (error) {
-    console.error("Error processing request:", error);
+    console.error('Error in chat:', error);
     return NextResponse.json(
-      { error: "Failed to process request" },
+      { error: error instanceof Error ? error.message : 'Failed to process chat message' },
       { status: 500 }
     );
   }

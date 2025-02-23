@@ -27,6 +27,7 @@ export interface DeepResearchResult {
   title: string;
   content: string;
   sources: SourceInfo[];
+  suggestedTopics?: string[];
 }
 
 export interface DeepResearchOptions {
@@ -449,7 +450,12 @@ ${questions.map((q, i) => answers[i] ? `Q: ${q}\nA: ${answers[i]}` : '').filter(
         // Extract facts from the learnings
         const facts = await this.extractFacts(result.learnings.join('\n'), sources);
 
-        onThought?.('Facts extracted! Organizing and formatting results...');
+        onThought?.('Facts extracted! Generating suggested topics...');
+
+        // Generate suggested topics based on the research results
+        const suggestedTopics = await this.generateSuggestedTopics(result.learnings.join('\n'));
+
+        onThought?.('Organizing and formatting results...');
 
         // Format the content in a structured way
         const formattedContent = this.formatContent(result.learnings);
@@ -458,6 +464,7 @@ ${questions.map((q, i) => answers[i] ? `Q: ${q}\nA: ${answers[i]}` : '').filter(
           title: 'Research Results',
           content: formattedContent,
           sources,
+          suggestedTopics,
         };
 
         // Verify the result structure
@@ -476,6 +483,35 @@ ${questions.map((q, i) => answers[i] ? `Q: ${q}\nA: ${answers[i]}` : '').filter(
     } catch (error) {
       console.error('Research error:', error);
       throw error;
+    }
+  }
+
+  private async generateSuggestedTopics(content: string): Promise<string[]> {
+    try {
+      const completion = await this.openai.chat.completions.create({
+        model: 'gpt-3.5-turbo',
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a research assistant helping to identify interesting follow-up topics. Generate 3-5 specific, focused topics that would help the user dive deeper into interesting aspects of the research. Make the topics specific and actionable, not too broad.'
+          },
+          {
+            role: 'user',
+            content: `Based on this research content, suggest 3-5 specific follow-up topics that would be interesting to explore:\n\n${content}`
+          }
+        ]
+      });
+
+      const suggestedTopics = completion.choices[0]?.message?.content
+        ?.split('\n')
+        .filter(line => line.trim())
+        .map(line => line.replace(/^\d+\.\s*/, '').trim())
+        .filter(topic => topic.length > 0) || [];
+
+      return suggestedTopics;
+    } catch (error) {
+      console.error('Error generating suggested topics:', error);
+      return [];
     }
   }
 } 
