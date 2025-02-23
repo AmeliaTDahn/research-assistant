@@ -5,6 +5,8 @@ import { LoadingSpinner } from './loading-spinner';
 import ReactMarkdown from 'react-markdown';
 import { findResearchQuery, storeResearchQuery, findReadingLevel, storeReadingLevel } from '@/lib/research-storage';
 import { ChatInterface } from './ChatInterface';
+import { useSearchParams } from 'next/navigation';
+import { supabase } from '@/lib/supabase';
 
 interface ResearchProgress {
   currentDepth: number;
@@ -66,8 +68,18 @@ function QuestionModal({ question, onAnswer, onSkip }: QuestionModalProps) {
   );
 }
 
+interface ThinkingStep {
+  id: string;
+  message: string;
+  timestamp: string;
+}
+
 export function DeepSearchComponent() {
-  const [query, setQuery] = useState('');
+  const searchParams = useSearchParams();
+  const initialQuery = searchParams.get('query');
+  const queryId = searchParams.get('id');
+
+  const [query, setQuery] = useState(initialQuery || '');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ResearchResult | null>(null);
@@ -77,8 +89,58 @@ export function DeepSearchComponent() {
   const [readingLevel, setReadingLevel] = useState<ReadingLevel>('advanced');
   const [isAdjustingLevel, setIsAdjustingLevel] = useState(false);
   const [adjustedContent, setAdjustedContent] = useState<string | null>(null);
-  const [currentQueryId, setCurrentQueryId] = useState<string | null>(null);
+  const [currentQueryId, setCurrentQueryId] = useState<string | null>(queryId);
   const thoughtsEndRef = useRef<HTMLDivElement>(null);
+  const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([]);
+
+  useEffect(() => {
+    // Load existing query results if queryId is provided
+    async function loadExistingQuery() {
+      if (queryId && initialQuery) {
+        setIsLoading(true);
+        try {
+          // First check if we have reading levels
+          const { data: levelData } = await supabase
+            .from('reading_levels')
+            .select('*')
+            .eq('query_id', queryId)
+            .single();
+
+          // Get the original query data
+          const { data: queryData, error } = await supabase
+            .from('research_queries')
+            .select('*')
+            .eq('id', queryId)
+            .single();
+
+          if (error || !queryData) {
+            throw new Error('Failed to load query');
+          }
+
+          setResult({
+            content: queryData.content,
+            sources: queryData.sources || [],
+            suggestedTopics: queryData.suggested_topics || []
+          });
+
+          setCurrentQueryId(queryId);
+
+          // If we have reading levels, set the adjusted content
+          if (levelData) {
+            setAdjustedContent(levelData.content);
+            setReadingLevel(levelData.level);
+          }
+        } catch (err) {
+          console.error('Error loading query:', err);
+          setError('Failed to load query results');
+        } finally {
+          setIsLoading(false);
+        }
+      }
+    }
+
+    loadExistingQuery();
+  }, [queryId, initialQuery]);
 
   // Clean content by removing code artifacts and object notations
   const cleanContent = (content: string) => {
@@ -317,6 +379,18 @@ export function DeepSearchComponent() {
     }
   };
 
+  const addThinkingStep = (message: string) => {
+    setThinkingSteps(prev => [...prev, {
+      id: Math.random().toString(36).substring(7),
+      message,
+      timestamp: new Date().toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
+    }]);
+  };
+
   return (
     <div className="space-y-6">
       <form onSubmit={handleSubmit} className="space-y-4">
@@ -447,6 +521,26 @@ export function DeepSearchComponent() {
         </div>
       )}
 
+      {/* Thinking Steps Display */}
+      {thinkingSteps.length > 0 && (
+        <div className="mt-4 space-y-2 max-h-[200px] overflow-y-auto">
+          {thinkingSteps.map((step) => (
+            <div 
+              key={step.id} 
+              className="flex items-start gap-3 text-gray-600 animate-fade-in"
+            >
+              <LoadingSpinner className="w-5 h-5 mt-0.5" />
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-400">{step.timestamp}</span>
+                  <span>{step.message}</span>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {error && (
         <div className="p-4 bg-red-50 text-red-700 rounded-md">
           {error}
@@ -563,45 +657,42 @@ export function DeepSearchComponent() {
           </div>
 
           {/* Sources Section */}
-          {result.sources.length > 0 && (
-            <div className="bg-gray-50 rounded-xl p-6 shadow-sm border border-gray-200">
-              <h2 className="text-2xl font-bold text-gray-900 flex items-center gap-2 mb-4">
-                <svg className="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-                </svg>
-                Sources
-              </h2>
-              <ul className="grid gap-3">
-                {result.sources.map((source, index) => (
-                  <li key={index} className="bg-white p-4 rounded-lg border border-gray-100 hover:border-indigo-200 transition-colors duration-200">
-                    <a
-                      href={source.url}
-                      target="_blank"
+          <div className="mt-8">
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              <div className="p-4 bg-gray-50 border-b border-gray-200">
+                <div className="flex items-center gap-2">
+                  <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                  </svg>
+                  <h3 className="text-lg font-semibold text-gray-900">Sources</h3>
+                </div>
+              </div>
+              <div className="divide-y divide-gray-200">
+                {result.sources?.map((source, index) => (
+                  <div key={index} className="p-4 hover:bg-gray-50 overflow-hidden">
+                    <a 
+                      href={source.url} 
+                      target="_blank" 
                       rel="noopener noreferrer"
-                      className="block group"
+                      className="text-blue-600 hover:text-blue-800 font-medium block"
                     >
-                      <div className="flex items-start gap-3">
-                        <svg className="w-5 h-5 text-gray-400 group-hover:text-indigo-500 mt-1 flex-shrink-0 transition-colors duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                        </svg>
-                        <div className="min-w-0 flex-1">
-                          <div className="text-indigo-600 group-hover:text-indigo-700 font-medium transition-colors duration-200 break-words line-clamp-2">
-                            {source.title || source.url.replace(/^https?:\/\/(www\.)?/, '')}
-                          </div>
-                          {source.snippet && (
-                            <p className="text-sm text-gray-500 mt-1 break-words line-clamp-2">{source.snippet}</p>
-                          )}
-                          <span className="text-xs text-gray-400 mt-1 block break-all">
-                            {source.url.replace(/^https?:\/\/(www\.)?/, '')}
-                          </span>
-                        </div>
+                      <div className="truncate">
+                        {source.title || source.url.replace(/^https?:\/\/(www\.)?/, '')}
                       </div>
                     </a>
-                  </li>
+                    <div className="text-sm text-gray-500 mt-1 break-all">
+                      {source.url}
+                    </div>
+                    {source.snippet && (
+                      <div className="text-sm text-gray-600 mt-2 line-clamp-2">
+                        {source.snippet}
+                      </div>
+                    )}
+                  </div>
                 ))}
-              </ul>
+              </div>
             </div>
-          )}
+          </div>
 
           {/* Suggested Topics Section */}
           {result.suggestedTopics && result.suggestedTopics.length > 0 && (
@@ -636,6 +727,16 @@ export function DeepSearchComponent() {
               </div>
             </div>
           )}
+
+          {/* Final Thoughts section */}
+          <div className="mt-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              Final Thoughts
+            </h2>
+          </div>
         </div>
       )}
     </div>
