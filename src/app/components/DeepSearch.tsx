@@ -18,10 +18,17 @@ interface ResearchProgress {
   completedQueries: number;
 }
 
+interface Source {
+  url: string;
+  title?: string;
+  content?: string;
+  snippet?: string;
+}
+
 interface ResearchResult {
   title: string;
   content: string;
-  sources: { url: string; title?: string; content?: string; snippet?: string; }[];
+  sources: Source[];
   suggestedTopics?: string[];
 }
 
@@ -523,7 +530,7 @@ export function DeepSearchComponent() {
 
       {/* Thinking Steps Display */}
       {thinkingSteps.length > 0 && (
-        <div className="mt-4 space-y-2 max-h-[200px] overflow-y-auto">
+        <div className="mt-4 space-y-2">
           {thinkingSteps.map((step) => (
             <div 
               key={step.id} 
@@ -652,7 +659,7 @@ export function DeepSearchComponent() {
           <div className="mt-8">
             <ChatInterface 
               researchContent={adjustedContent || result.content} 
-              sources={result.sources}
+              sources={result.sources || []}
             />
           </div>
 

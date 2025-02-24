@@ -1,20 +1,15 @@
 import { NextResponse } from "next/server";
 import OpenAI from 'openai';
-import Anthropic from '@anthropic-ai/sdk';
 
 // Initialize API clients
 const openai = new OpenAI({
-  apiKey: process.env.NEXT_PUBLIC_OPENAI_API_KEY,
-});
-
-const anthropic = new Anthropic({
-  apiKey: process.env.CLAUDE_API_KEY,
+  apiKey: process.env.OPENAI_KEY,
 });
 
 const PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions";
 
-if (!process.env.NEXT_PUBLIC_OPENAI_API_KEY) {
-  throw new Error('Missing NEXT_PUBLIC_OPENAI_API_KEY environment variable');
+if (!process.env.OPENAI_KEY) {
+  throw new Error('Missing OPENAI_KEY environment variable');
 }
 
 interface Source {
@@ -71,9 +66,9 @@ export async function POST(request: Request) {
           content: `You are a helpful research assistant that answers questions about research content. 
 Your responses should be:
 - Concise and direct
-- Based on the provided research content and source materials
+- Based on both the research summary and source materials
 - Include specific references to sections of the content when relevant
-- Reference specific sources when appropriate
+- Reference specific sources when appropriate to support your answers
 - Admit when you don't have enough information to answer
 - Professional but conversational in tone
 
